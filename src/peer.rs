@@ -30,12 +30,14 @@ mod cache_tests {
         let path = directory.path().join("peers.sqlite3").to_string_lossy().replace('\\', "/");
         let db = database::Database::new(&format!("sqlite://{path}?mode=rwc")).await.unwrap();
         db.insert_peer("peer123", &[1], &[2], "{}").await.unwrap();
+        let gate = db.hold_connections_for_test().await.unwrap();
         let peers = PeerMap { map: Default::default(), db };
         let mut first = Box::pin(peers.get("peer123"));
         let mut second = Box::pin(peers.get("peer123"));
-        // Both lookups miss the cache before either database read completes.
+        // Holding every pool connection makes both misses precede either read.
         assert!(poll!(first.as_mut()).is_pending());
         assert!(poll!(second.as_mut()).is_pending());
+        drop(gate);
         let (first, second) = tokio::join!(first, second);
         let first = first.unwrap();
         let second = second.unwrap();

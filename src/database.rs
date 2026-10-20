@@ -47,6 +47,13 @@ pub struct Peer {
 }
 
 impl Database {
+    #[cfg(test)]
+    pub(crate) async fn hold_connections_for_test(&self) -> ResultType<Vec<deadpool::managed::Object<DbPool>>> {
+        let mut connections = Vec::new();
+        for _ in 0..self.pool.status().max_size { connections.push(self.pool.get().await?); }
+        Ok(connections)
+    }
+
     pub async fn new(url: &str) -> ResultType<Database> {
         if !std::path::Path::new(url).exists() {
             std::fs::File::create(url).ok();
