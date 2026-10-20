@@ -20,7 +20,7 @@ lazy_static::lazy_static! {
 }
 
 #[cfg(test)]
-mod tests {
+mod cache_tests {
     use super::*;
     use hbb_common::{futures_util::poll, tokio};
 
