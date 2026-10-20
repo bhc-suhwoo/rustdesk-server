@@ -450,7 +450,7 @@ async fn make_pair(
             }
             Ok(response)
         };
-        let ws_stream = tokio_tungstenite::accept_hdr_async(stream, callback).await?;
+        let ws_stream = timeout(30_000, tokio_tungstenite::accept_hdr_async(stream, callback)).await??;
         make_pair_(ws_stream, addr, key, limiter).await;
     } else {
         make_pair_(FramedStream::from(stream, addr), addr, key, limiter).await;
