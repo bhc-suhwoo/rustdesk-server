@@ -156,6 +156,10 @@ impl PeerMap {
 
     #[inline]
     pub(crate) async fn get(&self, id: &str) -> Option<LockPeer> {
+        self.get_with_limit(id, *MAX_PEER_CACHE_ENTRIES).await
+    }
+
+    async fn get_with_limit(&self, id: &str, limit: usize) -> Option<LockPeer> {
         let p = self.map.read().await.get(id).cloned();
         if p.is_some() {
             return p;
@@ -170,7 +174,9 @@ impl PeerMap {
                 ..Default::default()
             };
             let peer = Arc::new(RwLock::new(peer));
-            return cache_peer(&mut *self.map.write().await, id, peer, *MAX_PEER_CACHE_ENTRIES);
+            let cached = cache_peer(&mut *self.map.write().await, id, peer.clone(), limit);
+            // Durable lookups remain available even when no new cache slot fits.
+            return Some(cached.unwrap_or(peer));
         }
         None
     }
@@ -178,7 +184,7 @@ impl PeerMap {
     #[inline]
     pub(crate) async fn get_or(&self, id: &str) -> Option<LockPeer> {
         if let Some(p) = self.get(id).await {
-            return Some(p);
+            return cache_peer(&mut *self.map.write().await, id, p, *MAX_PEER_CACHE_ENTRIES);
         }
         let mut w = self.map.write().await;
         cache_peer(&mut w, id, LockPeer::default(), *MAX_PEER_CACHE_ENTRIES)
@@ -207,6 +213,25 @@ impl PeerMap {
 mod bookkeeping_tests {
     use super::*;
     use hbb_common::tokio;
+
+    #[tokio::test]
+    async fn durable_lookup_remains_readable_when_the_cache_is_full() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("peers.sqlite3").to_string_lossy().replace('\\', "/");
+        let db = database::Database::new(&format!("sqlite://{path}?mode=rwc")).await.unwrap();
+        db.insert_peer("durable", &[1], &[2], "{}").await.unwrap();
+        let peers = PeerMap { map: Default::default(), db };
+        let online = LockPeer::default();
+        online.write().await.last_reg_time = Instant::now();
+        peers.map.write().await.insert("online".to_owned(), online.clone());
+        let loaded = peers.get_with_limit("durable", 1).await.unwrap();
+        assert_eq!(&loaded.read().await.pk[..], &[2]);
+        assert!(!peers.is_in_memory("durable").await);
+        let mut map = peers.map.write().await;
+        assert!(Arc::ptr_eq(map.get("online").unwrap(), &online));
+        assert!(cache_peer(&mut map, "durable", loaded, 1).is_none());
+        assert_eq!(map.len(), 1);
+    }
 
     #[test]
     fn capacity_rejects_new_peers_but_preserves_existing_identity() {
