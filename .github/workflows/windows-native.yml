@@ -46,4 +46,8 @@ jobs:
           path: |
             target/windows-installer/RustDeskServer-Native-x64-Setup.exe
             target/windows-installer/payload/build-info.json
-            C:/ProgramData/RustDeskServer/logs/**
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rustdesk-native-logs-${{ matrix.os }}
+          path: C:/ProgramData/RustDeskServer/logs/**
