@@ -1147,8 +1147,11 @@ impl RendezvousServer {
             });
             return;
         }
-        let stream = FramedStream::from(stream, addr);
+        let _permit = match connection_permit() { Some(permit) => permit, None => return };
+        let mut stream = FramedStream::from(stream, addr);
+        *stream.0.codec_mut() = control_codec();
         tokio::spawn(async move {
+            let _permit = _permit;
             let mut stream = stream;
             if let Some(Ok(bytes)) = stream.next_timeout(30_000).await {
                 if let Ok(msg_in) = RendezvousMessage::parse_from_bytes(&bytes) {
@@ -1172,10 +1175,12 @@ impl RendezvousServer {
     }
 
     async fn handle_listener(&self, stream: TcpStream, addr: SocketAddr, key: &str, ws: bool) {
+        let _permit = match connection_permit() { Some(permit) => permit, None => return };
         log::debug!("Tcp connection from {:?}, ws: {}", addr, ws);
         let mut rs = self.clone();
         let key = key.to_owned();
         tokio::spawn(async move {
+            let _permit = _permit;
             allow_err!(rs.handle_listener_inner(stream, addr, &key, ws).await);
         });
     }
@@ -1215,7 +1220,7 @@ impl RendezvousServer {
                 }
                 Ok(response)
             };
-            let ws_stream = tokio_tungstenite::accept_hdr_async(stream, callback).await?;
+            let ws_stream = tokio_tungstenite::accept_hdr_async_with_config(stream, callback, Some(websocket_config(false))).await?;
             let (a, mut b) = ws_stream.split();
             sink = Some(Sink::Ws(a));
             while let Ok(Some(Ok(msg))) = timeout(30_000, b.next()).await {
@@ -1226,7 +1231,7 @@ impl RendezvousServer {
                 }
             }
         } else {
-            let (a, mut b) = Framed::new(stream, BytesCodec::new()).split();
+            let (a, mut b) = Framed::new(stream, control_codec()).split();
             sink = Some(Sink::TcpStream(a));
             while let Ok(Some(Ok(bytes))) = timeout(30_000, b.next()).await {
                 if !self.handle_tcp(&bytes, &mut sink, addr, key, ws).await {
