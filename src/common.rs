@@ -25,6 +25,99 @@ pub fn parse_bind_address(value: &str) -> Result<Option<IpAddr>> {
     }
 }
 
+fn resource_limit(name: &str, default: usize, maximum: usize) -> usize {
+    get_arg(name).parse::<usize>().ok()
+        .filter(|n| *n > 0 && *n <= maximum).unwrap_or(default)
+}
+
+lazy_static::lazy_static! {
+    static ref CONNECTIONS: std::sync::Arc<tokio::sync::Semaphore> = std::sync::Arc::new(
+        tokio::sync::Semaphore::new(resource_limit("MAX_CONNECTIONS", 1024, 65_536))
+    );
+    static ref CONTROL_MESSAGE_LIMIT: usize = resource_limit("MAX_CONTROL_MESSAGE_SIZE", 1024 * 1024, 64 * 1024 * 1024);
+    static ref ADMISSION_LOG_START: Instant = Instant::now();
+}
+static LAST_ADMISSION_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+
+pub(crate) fn connection_permit(addr: SocketAddr) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    let permit = CONNECTIONS.clone().try_acquire_owned().ok();
+    if permit.is_none() {
+        let minute = ADMISSION_LOG_START.elapsed().as_secs() / 60;
+        if LAST_ADMISSION_LOG.swap(minute, std::sync::atomic::Ordering::Relaxed) != minute {
+            log::warn!("Connection from {addr} rejected: MAX_CONNECTIONS reached");
+        }
+    }
+    permit
+}
+
+pub(crate) fn control_codec() -> hbb_common::bytes_codec::BytesCodec {
+    let mut codec = hbb_common::bytes_codec::BytesCodec::new();
+    codec.set_max_packet_length(*CONTROL_MESSAGE_LIMIT);
+    codec
+}
+
+pub(crate) fn websocket_config(relay: bool) -> tungstenite::protocol::WebSocketConfig {
+    let mut config = tungstenite::protocol::WebSocketConfig::default();
+    let limit = if relay {
+        resource_limit("MAX_WEBSOCKET_MESSAGE_SIZE", 16 * 1024 * 1024, 64 * 1024 * 1024)
+    } else { *CONTROL_MESSAGE_LIMIT };
+    config.max_message_size = Some(limit);
+    config.max_frame_size = Some(limit);
+    config
+}
+
+#[cfg(test)]
+mod resource_limit_tests {
+    use super::*;
+    use hbb_common::{bytes::BytesMut, tokio_util::codec::Decoder};
+
+    #[test]
+    fn oversized_control_header_is_rejected_before_payload_reservation() {
+        let mut codec = control_codec();
+        let header = (((*CONTROL_MESSAGE_LIMIT as u32 + 1) << 2) | 3).to_le_bytes();
+        let mut bytes = BytesMut::from(&header[..]);
+        assert!(codec.decode(&mut bytes).is_err());
+        assert!(bytes.capacity() <= header.len());
+    }
+
+    #[test]
+    fn raw_relay_data_is_not_subject_to_control_packet_limit() {
+        let mut codec = control_codec();
+        codec.set_raw();
+        let mut bytes = BytesMut::zeroed(*CONTROL_MESSAGE_LIMIT + 1);
+        assert_eq!(codec.decode(&mut bytes).unwrap().unwrap().len(), *CONTROL_MESSAGE_LIMIT + 1);
+    }
+
+    #[test]
+    fn batched_online_queries_fit_the_default_control_limit() {
+        use hbb_common::{protobuf::Message, rendezvous_proto::*, tokio_util::codec::Encoder};
+        let mut request = RendezvousMessage::new();
+        request.set_online_request(OnlineRequest {
+            peers: (0..10_000).map(|i| format!("peer-{i:08}")).collect(),
+            ..Default::default()
+        });
+        let payload = request.write_to_bytes().unwrap();
+        assert!(payload.len() > 65536);
+        let mut codec = hbb_common::bytes_codec::BytesCodec::new();
+        codec.set_max_packet_length(1024 * 1024);
+        let mut bytes = BytesMut::new();
+        codec.encode(payload.clone().into(), &mut bytes).unwrap();
+        assert_eq!(&codec.decode(&mut bytes).unwrap().unwrap()[..], &payload);
+    }
+
+    #[test]
+    fn connection_limit_releases_capacity_on_drop() {
+        let addr = SocketAddr::from(([127, 0, 0, 1], 12345));
+        let initial = CONNECTIONS.available_permits();
+        let mut permits = Vec::new();
+        while let Some(permit) = connection_permit(addr) { permits.push(permit); }
+        assert_eq!(permits.len(), initial);
+        assert!(connection_permit(addr).is_none());
+        drop(permits.pop());
+        assert!(connection_permit(addr).is_some());
+    }
+}
+
 pub async fn listen_tcp(
     bind_addr: Option<IpAddr>,
     port: u16,
