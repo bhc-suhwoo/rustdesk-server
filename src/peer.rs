@@ -18,6 +18,31 @@ lazy_static::lazy_static! {
     pub(crate) static ref USER_STATUS: RwLock<UserStatusMap> = Default::default();
     pub(crate) static ref IP_CHANGES: Mutex<IpChangesMap> = Default::default();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hbb_common::{futures_util::poll, tokio};
+
+    #[tokio::test]
+    async fn concurrent_database_loads_keep_the_same_cached_peer() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("peers.sqlite3").to_string_lossy().replace('\\', "/");
+        let db = database::Database::new(&format!("sqlite://{path}?mode=rwc")).await.unwrap();
+        db.insert_peer("peer123", &[1], &[2], "{}").await.unwrap();
+        let peers = PeerMap { map: Default::default(), db };
+        let mut first = Box::pin(peers.get("peer123"));
+        let mut second = Box::pin(peers.get("peer123"));
+        // Both lookups miss the cache before either database read completes.
+        assert!(poll!(first.as_mut()).is_pending());
+        assert!(poll!(second.as_mut()).is_pending());
+        let (first, second) = tokio::join!(first, second);
+        let first = first.unwrap();
+        let second = second.unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(Arc::ptr_eq(&first, &peers.get("peer123").await.unwrap()));
+    }
+}
 pub const IP_CHANGE_DUR: u64 = 180;
 pub const IP_CHANGE_DUR_X2: u64 = IP_CHANGE_DUR * 2;
 pub const DAY_SECONDS: u64 = 3600 * 24;
@@ -151,8 +176,8 @@ impl PeerMap {
                 ..Default::default()
             };
             let peer = Arc::new(RwLock::new(peer));
-            self.map.write().await.insert(id.to_owned(), peer.clone());
-            return Some(peer);
+            let mut cache = self.map.write().await;
+            return Some(cache.entry(id.to_owned()).or_insert(peer).clone());
         }
         None
     }
