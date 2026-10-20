@@ -51,8 +51,9 @@ const REG_TIMEOUT: i64 = 30_000;
 type TcpStreamSink = SplitSink<Framed<TcpStream, BytesCodec>, Bytes>;
 type WsSink = SplitSink<tokio_tungstenite::WebSocketStream<TcpStream>, tungstenite::Message>;
 enum Sink {
-    TcpStream(TcpStreamSink),
-    Ws(WsSink),
+    // A pending writer can outlive its reader task and must keep the slot.
+    TcpStream(TcpStreamSink, Arc<tokio::sync::OwnedSemaphorePermit>),
+    Ws(WsSink, Arc<tokio::sync::OwnedSemaphorePermit>),
 }
 type Sender = mpsc::UnboundedSender<Data>;
 type Receiver = mpsc::UnboundedReceiver<Data>;
@@ -863,10 +864,10 @@ impl RendezvousServer {
         if let Some(sink) = sink.as_mut() {
             if let Ok(bytes) = msg.write_to_bytes() {
                 match sink {
-                    Sink::TcpStream(s) => {
+                    Sink::TcpStream(s, _permit) => {
                         allow_err!(s.send(Bytes::from(bytes)).await);
                     }
-                    Sink::Ws(ws) => {
+                    Sink::Ws(ws, _permit) => {
                         allow_err!(ws.send(tungstenite::Message::Binary(bytes)).await);
                     }
                 }
@@ -1175,13 +1176,12 @@ impl RendezvousServer {
     }
 
     async fn handle_listener(&self, stream: TcpStream, addr: SocketAddr, key: &str, ws: bool) {
-        let _permit = match connection_permit() { Some(permit) => permit, None => return };
+        let permit = match connection_permit() { Some(permit) => Arc::new(permit), None => return };
         log::debug!("Tcp connection from {:?}, ws: {}", addr, ws);
         let mut rs = self.clone();
         let key = key.to_owned();
         tokio::spawn(async move {
-            let _permit = _permit;
-            allow_err!(rs.handle_listener_inner(stream, addr, &key, ws).await);
+            allow_err!(rs.handle_listener_inner(stream, addr, &key, ws, permit).await);
         });
     }
 
@@ -1192,6 +1192,7 @@ impl RendezvousServer {
         mut addr: SocketAddr,
         key: &str,
         ws: bool,
+        permit: Arc<tokio::sync::OwnedSemaphorePermit>,
     ) -> ResultType<()> {
         let mut sink;
         if ws {
@@ -1220,9 +1221,9 @@ impl RendezvousServer {
                 }
                 Ok(response)
             };
-            let ws_stream = tokio_tungstenite::accept_hdr_async_with_config(stream, callback, Some(websocket_config(false))).await?;
+            let ws_stream = timeout(30_000, tokio_tungstenite::accept_hdr_async_with_config(stream, callback, Some(websocket_config(false)))).await??;
             let (a, mut b) = ws_stream.split();
-            sink = Some(Sink::Ws(a));
+            sink = Some(Sink::Ws(a, permit.clone()));
             while let Ok(Some(Ok(msg))) = timeout(30_000, b.next()).await {
                 if let tungstenite::Message::Binary(bytes) = msg {
                     if !self.handle_tcp(&bytes, &mut sink, addr, key, ws).await {
@@ -1232,7 +1233,7 @@ impl RendezvousServer {
             }
         } else {
             let (a, mut b) = Framed::new(stream, control_codec()).split();
-            sink = Some(Sink::TcpStream(a));
+            sink = Some(Sink::TcpStream(a, permit.clone()));
             while let Ok(Some(Ok(bytes))) = timeout(30_000, b.next()).await {
                 if !self.handle_tcp(&bytes, &mut sink, addr, key, ws).await {
                     break;
@@ -1427,6 +1428,30 @@ async fn create_tcp_listener(bind_addr: Option<IpAddr>, port: i32) -> ResultType
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn signaling_writer_retains_capacity_after_reader_finishes() {
+        let slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = Arc::new(slots.clone().acquire_owned().await.unwrap());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let _client = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+        let (stream, _) = listener.accept().await.unwrap();
+        let (writer, reader) = Framed::new(stream, control_codec()).split();
+        let sink = Sink::TcpStream(writer, permit.clone());
+        drop(reader);
+        drop(permit);
+        assert_eq!(slots.available_permits(), 0);
+        let (release, wait) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let _sink = sink;
+            wait.await.unwrap();
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(slots.available_permits(), 0);
+        release.send(()).unwrap();
+        task.await.unwrap();
+        assert_eq!(slots.available_permits(), 1);
+    }
 
     #[hbb_common::tokio::test]
     async fn udp_listener_uses_bind_address() {

@@ -452,7 +452,7 @@ async fn make_pair(
             }
             Ok(response)
         };
-        let ws_stream = tokio_tungstenite::accept_hdr_async_with_config(stream, callback, Some(crate::common::websocket_config(true))).await?;
+        let ws_stream = timeout(30_000, tokio_tungstenite::accept_hdr_async_with_config(stream, callback, Some(crate::common::websocket_config(true)))).await??;
         make_pair_(LimitedStream { inner: ws_stream, _permit: permit }, addr, key, limiter).await;
     } else {
         let mut stream = FramedStream::from(stream, addr);

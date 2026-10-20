@@ -35,10 +35,19 @@ lazy_static::lazy_static! {
         tokio::sync::Semaphore::new(resource_limit("MAX_CONNECTIONS", 1024, 65_536))
     );
     static ref CONTROL_MESSAGE_LIMIT: usize = resource_limit("MAX_CONTROL_MESSAGE_SIZE", 1024 * 1024, 64 * 1024 * 1024);
+    static ref ADMISSION_LOG_START: Instant = Instant::now();
 }
+static LAST_ADMISSION_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
 
 pub(crate) fn connection_permit() -> Option<tokio::sync::OwnedSemaphorePermit> {
-    CONNECTIONS.clone().try_acquire_owned().ok()
+    let permit = CONNECTIONS.clone().try_acquire_owned().ok();
+    if permit.is_none() {
+        let minute = ADMISSION_LOG_START.elapsed().as_secs() / 60;
+        if LAST_ADMISSION_LOG.swap(minute, std::sync::atomic::Ordering::Relaxed) != minute {
+            log::warn!("MAX_CONNECTIONS reached; refusing additional network connections");
+        }
+    }
+    permit
 }
 
 pub(crate) fn control_codec() -> hbb_common::bytes_codec::BytesCodec {
@@ -89,7 +98,8 @@ mod resource_limit_tests {
         });
         let payload = request.write_to_bytes().unwrap();
         assert!(payload.len() > 65536);
-        let mut codec = control_codec();
+        let mut codec = hbb_common::bytes_codec::BytesCodec::new();
+        codec.set_max_packet_length(1024 * 1024);
         let mut bytes = BytesMut::new();
         codec.encode(payload.clone().into(), &mut bytes).unwrap();
         assert_eq!(&codec.decode(&mut bytes).unwrap().unwrap()[..], &payload);
