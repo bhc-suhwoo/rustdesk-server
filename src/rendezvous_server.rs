@@ -1148,7 +1148,7 @@ impl RendezvousServer {
             });
             return;
         }
-        let _permit = match connection_permit() { Some(permit) => permit, None => return };
+        let _permit = match connection_permit(addr) { Some(permit) => permit, None => return };
         let mut stream = FramedStream::from(stream, addr);
         *stream.0.codec_mut() = control_codec();
         tokio::spawn(async move {
@@ -1176,7 +1176,7 @@ impl RendezvousServer {
     }
 
     async fn handle_listener(&self, stream: TcpStream, addr: SocketAddr, key: &str, ws: bool) {
-        let permit = match connection_permit() { Some(permit) => Arc::new(permit), None => return };
+        let permit = match connection_permit(addr) { Some(permit) => Arc::new(permit), None => return };
         log::debug!("Tcp connection from {:?}, ws: {}", addr, ws);
         let mut rs = self.clone();
         let key = key.to_owned();

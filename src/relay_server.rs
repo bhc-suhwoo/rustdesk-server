@@ -405,7 +405,7 @@ async fn handle_connection(
         });
         return;
     }
-    let permit = match crate::common::connection_permit() { Some(permit) => permit, None => return };
+    let permit = match crate::common::connection_permit(addr) { Some(permit) => permit, None => return };
     let ip = ip.to_string();
     if BLOCKLIST.read().await.get(&ip).is_some() {
         log::info!("{} blocked", ip);

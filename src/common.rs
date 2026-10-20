@@ -39,12 +39,12 @@ lazy_static::lazy_static! {
 }
 static LAST_ADMISSION_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
 
-pub(crate) fn connection_permit() -> Option<tokio::sync::OwnedSemaphorePermit> {
+pub(crate) fn connection_permit(addr: SocketAddr) -> Option<tokio::sync::OwnedSemaphorePermit> {
     let permit = CONNECTIONS.clone().try_acquire_owned().ok();
     if permit.is_none() {
         let minute = ADMISSION_LOG_START.elapsed().as_secs() / 60;
         if LAST_ADMISSION_LOG.swap(minute, std::sync::atomic::Ordering::Relaxed) != minute {
-            log::warn!("MAX_CONNECTIONS reached; refusing additional network connections");
+            log::warn!("Connection from {addr} rejected: MAX_CONNECTIONS reached");
         }
     }
     permit
@@ -107,13 +107,14 @@ mod resource_limit_tests {
 
     #[test]
     fn connection_limit_releases_capacity_on_drop() {
+        let addr = SocketAddr::from(([127, 0, 0, 1], 12345));
         let initial = CONNECTIONS.available_permits();
         let mut permits = Vec::new();
-        while let Some(permit) = connection_permit() { permits.push(permit); }
+        while let Some(permit) = connection_permit(addr) { permits.push(permit); }
         assert_eq!(permits.len(), initial);
-        assert!(connection_permit().is_none());
+        assert!(connection_permit(addr).is_none());
         drop(permits.pop());
-        assert!(connection_permit().is_some());
+        assert!(connection_permit(addr).is_some());
     }
 }
 
