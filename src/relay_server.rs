@@ -612,33 +612,6 @@ async fn relay(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    struct TestStream;
-
-    #[async_trait]
-    impl StreamTrait for TestStream {
-        async fn recv(&mut self) -> Option<Result<BytesMut, Error>> { None }
-        async fn send_raw(&mut self, _: Bytes) -> ResultType<()> { Ok(()) }
-        fn is_ws(&self) -> bool { false }
-        fn set_raw(&mut self) {}
-    }
-
-    #[test]
-    fn old_waiter_cannot_expire_a_reused_pair_id() {
-        let old = Arc::new(());
-        let current = Arc::new(());
-        let mut peers: HashMap<String, WaitingPeer> = HashMap::new();
-        peers.insert("pair".to_owned(), (current.clone(), Box::new(TestStream)));
-        expire_waiter(&mut peers, "pair", &old);
-        assert!(peers.contains_key("pair"));
-        expire_waiter(&mut peers, "pair", &current);
-        assert!(!peers.contains_key("pair"));
-    }
-}
-
 fn get_server_sk(key: &str) -> ResultType<String> {
     let mut key = key.to_owned();
     if let Ok(sk) = base64::decode(&key) {
@@ -718,4 +691,31 @@ impl StreamTrait for tokio_tungstenite::WebSocketStream<TcpStream> {
     }
 
     fn set_raw(&mut self) {}
+}
+
+#[cfg(test)]
+mod waiter_tests {
+    use super::*;
+
+    struct TestStream;
+
+    #[async_trait]
+    impl StreamTrait for TestStream {
+        async fn recv(&mut self) -> Option<Result<BytesMut, Error>> { None }
+        async fn send_raw(&mut self, _: Bytes) -> ResultType<()> { Ok(()) }
+        fn is_ws(&self) -> bool { false }
+        fn set_raw(&mut self) {}
+    }
+
+    #[test]
+    fn old_waiter_cannot_expire_a_reused_pair_id() {
+        let old = Arc::new(());
+        let current = Arc::new(());
+        let mut peers: HashMap<String, WaitingPeer> = HashMap::new();
+        peers.insert("pair".to_owned(), (current.clone(), Box::new(TestStream)));
+        expire_waiter(&mut peers, "pair", &old);
+        assert!(peers.contains_key("pair"));
+        expire_waiter(&mut peers, "pair", &current);
+        assert!(!peers.contains_key("pair"));
+    }
 }
