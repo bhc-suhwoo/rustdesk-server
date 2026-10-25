@@ -46,11 +46,7 @@ const BLACKLIST_FILE: &str = "blacklist.txt";
 const BLOCKLIST_FILE: &str = "blocklist.txt";
 
 #[tokio::main(flavor = "multi_thread")]
-pub async fn start_with_bind(
-    bind_addr: Option<IpAddr>,
-    port: &str,
-    key: &str,
-) -> ResultType<()> {
+pub async fn start_with_bind(bind_addr: Option<IpAddr>, port: &str, key: &str) -> ResultType<()> {
     let key = get_server_sk(key)?;
     if let Ok(mut file) = std::fs::File::open(BLACKLIST_FILE) {
         let mut contents = String::new();
@@ -86,6 +82,10 @@ pub async fn start_with_bind(
     log::info!("Listening on tcp :{}", port);
     let port2 = port + 2;
     log::info!("Listening on websocket :{}", port2);
+    if let Some(metrics_arg) = crate::common::get_arg_opt("METRICS") {
+        let m_port = metrics_arg.parse::<u16>().unwrap_or(21114);
+        crate::metrics::start_metrics_server(m_port, "hbbr").await;
+    }
     let main_task = async move {
         loop {
             log::info!("Start");
@@ -504,6 +504,7 @@ async fn relay(
     total_limiter: Limiter,
     id: String,
 ) -> ResultType<()> {
+    let _peer_guard = crate::metrics::ActivePeerGuard::new();
     let ip = addr.ip().to_string();
     let mut tm = std::time::Instant::now();
     let mut elapsed = 0;
@@ -534,6 +535,7 @@ async fn relay(
                     total += nb;
                     total_s += nb;
                     if !bytes.is_empty() {
+                        crate::metrics::add_relayed_bytes(bytes.len());
                         stream.send_raw(bytes.into()).await?;
                     }
                 } else {
@@ -553,6 +555,7 @@ async fn relay(
                     total += nb;
                     total_s += nb;
                     if !bytes.is_empty() {
+                        crate::metrics::add_relayed_bytes(bytes.len());
                         peer.send_raw(bytes.into()).await?;
                     }
                 } else {
